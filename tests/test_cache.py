@@ -1,31 +1,40 @@
 """Tests for cache module."""
 
+import unittest
 import json
 import tempfile
-from pathlib import Path
-
-import pytest
+import shutil
+import os
+import os.path
 
 from azvg.cache import CacheManager
 
 
-def test_cache_initialization():
-    """Test cache manager initialization."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        cache_root = Path(tmpdir)
-        cache = CacheManager(cache_root, 'TestOrg', git_tracking=False)
+class TestCacheManager(unittest.TestCase):
+    """Test cases for CacheManager class."""
+    
+    def setUp(self):
+        """Set up test fixtures."""
+        self.temp_dir = tempfile.mkdtemp()
         
-        assert cache.cache_root == cache_root
-        assert cache.organization == 'TestOrg'
-        assert cache.org_dir == cache_root / 'TestOrg'
-        assert cache.org_dir.exists()
-
-
-def test_save_and_load_variable_group():
-    """Test saving and loading variable groups."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        cache_root = Path(tmpdir)
-        cache = CacheManager(cache_root, 'TestOrg', git_tracking=False)
+    def tearDown(self):
+        """Clean up test fixtures."""
+        shutil.rmtree(self.temp_dir)
+    
+    def test_cache_initialization(self):
+        """Test cache manager initialization."""
+        cache = CacheManager(self.temp_dir, 'TestOrg', git_tracking=False)
+        
+        self.assertEqual(cache.cache_root, self.temp_dir)
+        self.assertEqual(cache.organization, 'TestOrg')
+        
+        expected_org_dir = os.path.join(self.temp_dir, 'TestOrg')
+        self.assertEqual(cache.org_dir, expected_org_dir)
+        self.assertTrue(os.path.exists(cache.org_dir))
+    
+    def test_save_and_load_variable_group(self):
+        """Test saving and loading variable groups."""
+        cache = CacheManager(self.temp_dir, 'TestOrg', git_tracking=False)
         
         vg_data = {
             'id': 123,
@@ -38,53 +47,131 @@ def test_save_and_load_variable_group():
         
         # Save
         filepath = cache.save_variable_group('TestProject', vg_data)
-        assert filepath.exists()
+        self.assertTrue(os.path.exists(filepath))
         
         # Load
         loaded = cache.load_variable_group('TestProject', 'TestConfig')
-        assert loaded is not None
-        assert loaded['name'] == 'TestConfig'
-        assert loaded['id'] == 123
-
-
-def test_save_secure_file():
-    """Test saving secure files."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        cache_root = Path(tmpdir)
-        cache = CacheManager(cache_root, 'TestOrg', git_tracking=False)
+        self.assertIsNotNone(loaded)
+        self.assertEqual(loaded['name'], 'TestConfig')
+        self.assertEqual(loaded['id'], 123)
+    
+    def test_save_secure_file(self):
+        """Test saving secure files."""
+        cache = CacheManager(self.temp_dir, 'TestOrg', git_tracking=False)
         
-        content = b'This is binary content'
-        filepath = cache.save_secure_file('TestProject', 'test.pfx',
-                                         content, 'sf_123')
+        test_content = b'This is test file content'
+        filename = 'test.txt'
+        file_id = '456'
         
-        assert filepath.exists()
-        assert filepath.read_bytes() == content
-        assert 'sf_123' in filepath.name
-        assert 'test.pfx' in filepath.name
-
-
-def test_list_cached_items():
-    """Test listing cached items."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        cache_root = Path(tmpdir)
-        cache = CacheManager(cache_root, 'TestOrg', git_tracking=False)
+        # Save
+        filepath = cache.save_secure_file('TestProject', filename, 
+                                        test_content, file_id)
+        self.assertTrue(os.path.exists(filepath))
         
-        # Save some items
-        vg_data = {'id': 1, 'name': 'Config1', 'variables': {}}
+        # Verify content
+        with open(filepath, 'rb') as f:
+            saved_content = f.read()
+        self.assertEqual(saved_content, test_content)
+    
+    def test_list_cached_items(self):
+        """Test listing cached variable groups and secure files."""
+        cache = CacheManager(self.temp_dir, 'TestOrg', git_tracking=False)
+        
+        # Save some test data
+        vg_data = {
+            'id': 789,
+            'name': 'ProdConfig',
+            'variables': {'env': {'value': 'production'}}
+        }
         cache.save_variable_group('TestProject', vg_data)
         
-        vg_data = {'id': 2, 'name': 'Config2', 'variables': {}}
-        cache.save_variable_group('TestProject', vg_data)
-        
+        test_content = b'Secure file content'
         cache.save_secure_file('TestProject', 'cert.pfx', 
-                             b'content', 'sf_100')
+                             test_content, '101')
         
-        # List items
+        # List variable groups
         vgs = cache.list_cached_vgs('TestProject')
-        assert len(vgs) == 2
-        assert any(vg['name'] == 'Config1' for vg in vgs)
-        assert any(vg['name'] == 'Config2' for vg in vgs)
+        self.assertEqual(len(vgs), 1)
+        self.assertEqual(vgs[0]['name'], 'ProdConfig')
+        self.assertEqual(vgs[0]['id'], 789)
         
+        # List secure files
         sfs = cache.list_cached_sfs('TestProject')
-        assert len(sfs) == 1
-        assert sfs[0]['name'] == 'cert.pfx'
+        self.assertEqual(len(sfs), 1)
+        self.assertEqual(sfs[0]['name'], 'cert.pfx')
+        self.assertEqual(sfs[0]['id'], '101')
+    
+    def test_get_status(self):
+        """Test getting cache status."""
+        cache = CacheManager(self.temp_dir, 'TestOrg', git_tracking=False)
+        
+        # Add some test data
+        vg_data = {'id': 1, 'name': 'Config1', 'variables': {}}
+        cache.save_variable_group('Project1', vg_data)
+        
+        test_content = b'test'
+        cache.save_secure_file('Project1', 'file1.txt', test_content, '1')
+        
+        # Get status
+        status = cache.get_status()
+        
+        self.assertEqual(status['organization'], 'TestOrg')
+        self.assertEqual(status['cache_dir'], cache.org_dir)
+        self.assertFalse(status['git_tracking'])
+        
+        # Check projects
+        self.assertEqual(len(status['projects']), 1)
+        project = status['projects'][0]
+        self.assertEqual(project['name'], 'Project1')
+        self.assertEqual(project['variable_groups'], 1)
+        self.assertEqual(project['secure_files'], 1)
+    
+    def test_project_directory_creation(self):
+        """Test project directory creation."""
+        cache = CacheManager(self.temp_dir, 'TestOrg', git_tracking=False)
+        
+        # Get project directory (should create it)
+        proj_dir = cache.get_project_dir('NewProject')
+        self.assertTrue(os.path.exists(proj_dir))
+        self.assertTrue(os.path.isdir(proj_dir))
+        
+        # Get VG directory (should create it)
+        vg_dir = cache.get_vg_dir('NewProject')
+        self.assertTrue(os.path.exists(vg_dir))
+        expected_vg_dir = os.path.join(proj_dir, 'variable-groups')
+        self.assertEqual(vg_dir, expected_vg_dir)
+        
+        # Get SF directory (should create it)
+        sf_dir = cache.get_sf_dir('NewProject')
+        self.assertTrue(os.path.exists(sf_dir))
+        expected_sf_dir = os.path.join(proj_dir, 'secure-files')
+        self.assertEqual(sf_dir, expected_sf_dir)
+    
+    def test_variable_group_pattern_matching(self):
+        """Test variable group pattern matching for loading."""
+        cache = CacheManager(self.temp_dir, 'TestOrg', git_tracking=False)
+        
+        # Save multiple VGs
+        vg1 = {'id': 1, 'name': 'ProductionConfig', 'variables': {}}
+        vg2 = {'id': 2, 'name': 'StagingConfig', 'variables': {}}
+        
+        cache.save_variable_group('TestProject', vg1)
+        cache.save_variable_group('TestProject', vg2)
+        
+        # Test exact match
+        loaded = cache.load_variable_group('TestProject', 'ProductionConfig')
+        self.assertIsNotNone(loaded)
+        self.assertEqual(loaded['name'], 'ProductionConfig')
+        
+        # Test pattern match
+        loaded = cache.load_variable_group('TestProject', 'Production')
+        self.assertIsNotNone(loaded)
+        self.assertEqual(loaded['name'], 'ProductionConfig')
+        
+        # Test no match
+        loaded = cache.load_variable_group('TestProject', 'NonExistent')
+        self.assertIsNone(loaded)
+
+
+if __name__ == '__main__':
+    unittest.main()

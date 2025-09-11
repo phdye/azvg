@@ -47,6 +47,8 @@ htmlcov/
 .azvg/
 *.backup
 *.tmp
+*.bkp
+*.bak
 ?
 ??
 

@@ -3,19 +3,23 @@
 import base64
 import json
 import logging
-from typing import Dict, Any, List, Optional
-from pathlib import Path
+try:
+    # Python 2
+    import urllib2
+    import urlparse
+except ImportError:
+    # Python 3
+    import urllib.request as urllib2
+    import urllib.parse as urlparse
 
-import requests
-from requests.auth import HTTPBasicAuth
 
 logger = logging.getLogger(__name__)
 
 
-class AzureDevOpsClient:
+class AzureDevOpsClient(object):
     """Client for Azure DevOps REST API."""
     
-    def __init__(self, organization: str, pat: str):
+    def __init__(self, organization, pat):
         """Initialize Azure DevOps client.
         
         Args:
@@ -24,27 +28,72 @@ class AzureDevOpsClient:
         """
         self.organization = organization
         self.pat = pat
-        self.base_url = f"https://dev.azure.com/{organization}"
-        self.auth = HTTPBasicAuth('', pat)
-        self.session = requests.Session()
-        self.session.auth = self.auth
-        self.session.headers.update({
-            'Content-Type': 'application/json',
-            'Accept': 'application/json',
-        })
+        self.base_url = "https://dev.azure.com/{0}".format(organization)
+        
+        # Create basic auth header (empty username, PAT as password)
+        auth_string = base64.b64encode(
+            ":{0}".format(pat).encode('utf-8')
+        ).decode('ascii')
+        self.auth_header = "Basic {0}".format(auth_string)
     
-    def list_projects(self) -> List[Dict[str, Any]]:
+    def _make_request(self, url, method='GET', data=None):
+        """Make HTTP request to Azure DevOps API.
+        
+        Args:
+            url: Request URL.
+            method: HTTP method.
+            data: Request data (for POST/PUT).
+            
+        Returns:
+            Parsed JSON response.
+            
+        Raises:
+            Exception: If request fails.
+        """
+        request = urllib2.Request(url)
+        request.add_header("Authorization", self.auth_header)
+        request.add_header("Content-Type", "application/json")
+        request.add_header("Accept", "application/json")
+        
+        if data and method in ['POST', 'PUT']:
+            request.add_data(json.dumps(data))
+            
+        # Set method for non-GET requests
+        if method != 'GET':
+            request.get_method = lambda: method
+        
+        try:
+            response = urllib2.urlopen(request)
+            response_text = response.read()
+            return json.loads(response_text) if response_text else {}
+        except urllib2.HTTPError as e:
+            error_msg = "HTTP {0}: {1}".format(e.code, e.msg)
+            try:
+                error_detail = e.read()
+                if error_detail:
+                    error_data = json.loads(error_detail)
+                    if 'message' in error_data:
+                        error_msg = "{0} - {1}".format(
+                            error_msg, error_data['message'])
+            except (ValueError, KeyError):
+                pass
+            raise Exception(error_msg)
+        except urllib2.URLError as e:
+            raise Exception("URL Error: {0}".format(str(e.reason)))
+        except ValueError as e:  # JSON decode errors
+            raise Exception("Invalid JSON response: {0}".format(str(e)))
+    
+    def list_projects(self):
         """List all projects in organization.
         
         Returns:
             List of project dictionaries.
         """
-        url = f"{self.base_url}/_apis/projects?api-version=7.0"
-        response = self.session.get(url)
-        response.raise_for_status()
-        return response.json().get('value', [])
+        url = "{0}/_apis/projects?api-version=7.0".format(self.base_url)
+        response = self._make_request(url)
+        return response.get('value', [])
     
-    def get_variable_groups(self, project: str) -> List[Dict[str, Any]]:
+    def get_variable_groups(self, project):
         """Get all variable groups for a project.
         
         Args:
@@ -53,14 +102,12 @@ class AzureDevOpsClient:
         Returns:
             List of variable group dictionaries.
         """
-        url = (f"{self.base_url}/{project}/_apis/distributedtask/"
-               f"variablegroups?api-version=7.0")
-        response = self.session.get(url)
-        response.raise_for_status()
-        return response.json().get('value', [])
+        url = ("{0}/{1}/_apis/distributedtask/"
+               "variablegroups?api-version=7.0").format(self.base_url, project)
+        response = self._make_request(url)
+        return response.get('value', [])
     
-    def get_variable_group(self, project: str, 
-                          group_id: int) -> Dict[str, Any]:
+    def get_variable_group(self, project, group_id):
         """Get specific variable group.
         
         Args:
@@ -70,14 +117,12 @@ class AzureDevOpsClient:
         Returns:
             Variable group dictionary.
         """
-        url = (f"{self.base_url}/{project}/_apis/distributedtask/"
-               f"variablegroups/{group_id}?api-version=7.0")
-        response = self.session.get(url)
-        response.raise_for_status()
-        return response.json()
+        url = ("{0}/{1}/_apis/distributedtask/"
+               "variablegroups/{2}?api-version=7.0").format(
+                   self.base_url, project, group_id)
+        return self._make_request(url)
     
-    def update_variable_group(self, project: str, group_id: int,
-                            data: Dict[str, Any]) -> Dict[str, Any]:
+    def update_variable_group(self, project, group_id, data):
         """Update variable group.
         
         Args:
@@ -88,14 +133,12 @@ class AzureDevOpsClient:
         Returns:
             Updated variable group dictionary.
         """
-        url = (f"{self.base_url}/{project}/_apis/distributedtask/"
-               f"variablegroups/{group_id}?api-version=7.0")
-        response = self.session.put(url, json=data)
-        response.raise_for_status()
-        return response.json()
+        url = ("{0}/{1}/_apis/distributedtask/"
+               "variablegroups/{2}?api-version=7.0").format(
+                   self.base_url, project, group_id)
+        return self._make_request(url, method='PUT', data=data)
     
-    def create_variable_group(self, project: str,
-                            data: Dict[str, Any]) -> Dict[str, Any]:
+    def create_variable_group(self, project, data):
         """Create new variable group.
         
         Args:
@@ -105,13 +148,11 @@ class AzureDevOpsClient:
         Returns:
             Created variable group dictionary.
         """
-        url = (f"{self.base_url}/{project}/_apis/distributedtask/"
-               f"variablegroups?api-version=7.0")
-        response = self.session.post(url, json=data)
-        response.raise_for_status()
-        return response.json()
+        url = ("{0}/{1}/_apis/distributedtask/"
+               "variablegroups?api-version=7.0").format(self.base_url, project)
+        return self._make_request(url, method='POST', data=data)
     
-    def list_secure_files(self, project: str) -> List[Dict[str, Any]]:
+    def list_secure_files(self, project):
         """List all secure files for a project.
         
         Args:
@@ -120,14 +161,12 @@ class AzureDevOpsClient:
         Returns:
             List of secure file dictionaries.
         """
-        url = (f"{self.base_url}/{project}/_apis/distributedtask/"
-               f"securefiles?api-version=7.0")
-        response = self.session.get(url)
-        response.raise_for_status()
-        return response.json().get('value', [])
+        url = ("{0}/{1}/_apis/distributedtask/"
+               "securefiles?api-version=7.0").format(self.base_url, project)
+        response = self._make_request(url)
+        return response.get('value', [])
     
-    def download_secure_file(self, project: str, 
-                           file_id: str) -> bytes:
+    def download_secure_file(self, project, file_id):
         """Download secure file content.
         
         Args:
@@ -137,14 +176,22 @@ class AzureDevOpsClient:
         Returns:
             File content as bytes.
         """
-        url = (f"{self.base_url}/{project}/_apis/distributedtask/"
-               f"securefiles/{file_id}?download=true&api-version=7.0")
-        response = self.session.get(url)
-        response.raise_for_status()
-        return response.content
+        url = ("{0}/{1}/_apis/distributedtask/"
+               "securefiles/{2}?download=true&api-version=7.0").format(
+                   self.base_url, project, file_id)
+        
+        request = urllib2.Request(url)
+        request.add_header("Authorization", self.auth_header)
+        
+        try:
+            response = urllib2.urlopen(request)
+            return response.read()
+        except urllib2.HTTPError as e:
+            raise Exception("HTTP {0}: {1}".format(e.code, e.msg))
+        except urllib2.URLError as e:
+            raise Exception("URL Error: {0}".format(str(e.reason)))
     
-    def upload_secure_file(self, project: str, name: str,
-                         content: bytes) -> Dict[str, Any]:
+    def upload_secure_file(self, project, name, content):
         """Upload secure file.
         
         Args:
@@ -155,23 +202,42 @@ class AzureDevOpsClient:
         Returns:
             Created secure file dictionary.
         """
-        url = (f"{self.base_url}/{project}/_apis/distributedtask/"
-               f"securefiles?name={name}&api-version=7.0")
+        url = ("{0}/{1}/_apis/distributedtask/"
+               "securefiles?name={2}&api-version=7.0").format(
+                   self.base_url, project, name)
         
-        # Secure files use different content type
-        headers = {'Content-Type': 'application/octet-stream'}
-        response = self.session.post(url, data=content, headers=headers)
-        response.raise_for_status()
-        return response.json()
+        request = urllib2.Request(url, data=content)
+        request.add_header("Authorization", self.auth_header)
+        request.add_header("Content-Type", "application/octet-stream")
+        request.get_method = lambda: 'POST'
+        
+        try:
+            response = urllib2.urlopen(request)
+            response_text = response.read()
+            return json.loads(response_text) if response_text else {}
+        except urllib2.HTTPError as e:
+            raise Exception("HTTP {0}: {1}".format(e.code, e.msg))
+        except urllib2.URLError as e:
+            raise Exception("URL Error: {0}".format(str(e.reason)))
     
-    def delete_secure_file(self, project: str, file_id: str) -> None:
+    def delete_secure_file(self, project, file_id):
         """Delete secure file.
         
         Args:
             project: Project name.
             file_id: Secure file ID.
         """
-        url = (f"{self.base_url}/{project}/_apis/distributedtask/"
-               f"securefiles/{file_id}?api-version=7.0")
-        response = self.session.delete(url)
-        response.raise_for_status()
+        url = ("{0}/{1}/_apis/distributedtask/"
+               "securefiles/{2}?api-version=7.0").format(
+                   self.base_url, project, file_id)
+        
+        request = urllib2.Request(url)
+        request.add_header("Authorization", self.auth_header)
+        request.get_method = lambda: 'DELETE'
+        
+        try:
+            urllib2.urlopen(request)
+        except urllib2.HTTPError as e:
+            raise Exception("HTTP {0}: {1}".format(e.code, e.msg))
+        except urllib2.URLError as e:
+            raise Exception("URL Error: {0}".format(str(e.reason)))

@@ -1,17 +1,30 @@
-# Testing
-pytest>=7.0.0
-pytest-cov>=4.0.0
-pytest-mock>=3.10.0
-
-# Code quality
-black>=23.0.0
-ruff>=0.0.250
-mypy>=1.0.0
-types-requests
-types-pyyaml
-types-python-dateutil
-types-tabulate
-
-# Documentation
-sphinx>=5.0.0
-sphinx-rtd-theme>=1.2.0
+# AZVG Development Requirements for Python 3.2.5
+#
+# This project uses ONLY the Python 3.2.5 standard library.
+# No external development dependencies are allowed due to target environment.
+#
+# Development tools replaced with built-in alternatives:
+# - pytest -> unittest (built-in)
+# - pytest-cov -> (manual coverage tracking)
+# - pytest-mock -> unittest.mock (built-in in 3.3+, not available in 3.2)
+# - black -> manual code formatting
+# - ruff -> manual PEP 8 checking
+# - mypy -> docstring type documentation
+# - sphinx -> manual documentation
+#
+# Development workflow for Python 3.2.5:
+#
+# 1. Run tests:
+#    python -m unittest discover tests/
+#
+# 2. Syntax check:
+#    python -m py_compile src/azvg/*.py
+#
+# 3. Manual PEP 8 checking:
+#    - Check line length <= 79 characters
+#    - Check import organization
+#    - Check naming conventions
+#
+# 4. Install for development:
+#    python setup.py develop
+#    # OR export PYTHONPATH="src:$PYTHONPATH"

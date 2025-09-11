@@ -1,0 +1,30 @@
+{
+  "default": {
+    "organization": "MyOrg",
+    "project": "Project-A"
+  },
+  "organizations": {
+    "MyOrg": {
+      "pat": "${AZURE_DEVOPS_PAT}",
+      "projects": {
+        "Project-A": {
+          "aliases": {
+            "prod": "Production*",
+            "stage": "Staging*"
+          }
+        },
+        "Project-B": {
+          "default_type": "vg"
+        },
+        "Project-C": {
+          "auto_pull": true
+        }
+      }
+    }
+  },
+  "cache": {
+    "root": "~/.azvg",
+    "git_tracking": true,
+    "auto_commit": true
+  }
+}

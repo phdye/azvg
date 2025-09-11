@@ -1,12 +1,10 @@
+# -*- coding: utf-8 -*-
 """Command-line interface for azvg."""
 
 import sys
 import logging
-from pathlib import Path
-from typing import Optional
-
-import click
-from tabulate import tabulate
+import os.path
+import argparse
 
 from . import __version__
 from .config import Config
@@ -22,75 +20,168 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-@click.group()
-@click.version_option(version=__version__)
-@click.pass_context
-def main(ctx):
-    """Azure DevOps Variable Groups Manager.
+def simple_table(data, headers):
+    """Simple table formatter for Python 3.2.5.
     
-    Manage Azure DevOps Library items locally with git tracking.
+    Args:
+        data: List of lists containing table data.
+        headers: List of column headers.
+        
+    Returns:
+        Formatted table string.
     """
-    ctx.ensure_object(dict)
-    ctx.obj['config'] = Config()
-
-
-@main.command()
-@click.option('--org', required=True, help='Azure DevOps organization')
-@click.option('--pat', required=True, help='Personal Access Token')
-@click.option('--project', help='Default project')
-@click.pass_context
-def init(ctx, org: str, pat: str, project: Optional[str]):
-    """Initialize azvg configuration."""
-    config = ctx.obj['config']
+    if not data:
+        return ""
     
+    # Calculate column widths
+    widths = [len(h) for h in headers]
+    for row in data:
+        for i, cell in enumerate(row):
+            if i < len(widths):
+                widths[i] = max(widths[i], len(str(cell)))
+    
+    # Format header
+    header_line = "  ".join(h.ljust(w) for h, w in zip(headers, widths))
+    separator = "  ".join("-" * w for w in widths)
+    
+    # Format rows
+    lines = [header_line, separator]
+    for row in data:
+        line = "  ".join(str(cell).ljust(w) 
+                        for cell, w in zip(row, widths))
+        lines.append(line)
+    
+    return "\n".join(lines)
+
+
+def create_argument_parser():
+    """Create command line argument parser."""
+    parser = argparse.ArgumentParser(
+        description='Azure DevOps Variable Groups Manager',
+        prog='azvg'
+    )
+    
+    parser.add_argument('--version', action='version', 
+                       version='azvg {0}'.format(__version__))
+    
+    # Subcommands
+    subparsers = parser.add_subparsers(dest='command', help='Commands')
+    
+    # init command
+    init_parser = subparsers.add_parser('init', 
+                                       help='Initialize azvg configuration')
+    init_parser.add_argument('--org', required=True,
+                            help='Azure DevOps organization')
+    init_parser.add_argument('--pat', required=True,
+                            help='Personal Access Token')
+    init_parser.add_argument('--project',
+                            help='Default project')
+    
+    # project commands
+    project_parser = subparsers.add_parser('project',
+                                          help='Manage projects')
+    project_subs = project_parser.add_subparsers(dest='project_command')
+    
+    # project list
+    project_subs.add_parser('list', help='List all projects')
+    
+    # project use
+    project_use = project_subs.add_parser('use', 
+                                         help='Set default project')
+    project_use.add_argument('project_name', help='Project name')
+    
+    # project info
+    project_info = project_subs.add_parser('info',
+                                          help='Show project information')
+    project_info.add_argument('project_name', nargs='?',
+                             help='Project name')
+    
+    # pull command
+    pull_parser = subparsers.add_parser('pull', 
+                                       help='Pull items from Azure DevOps')
+    pull_parser.add_argument('target', nargs='?',
+                            help='Variable group name or pattern')
+    pull_parser.add_argument('--project',
+                            help='Specific project')
+    pull_parser.add_argument('--all-projects', action='store_true',
+                            help='Pull from all projects')
+    pull_parser.add_argument('--type', dest='item_type',
+                            choices=['vg', 'sf', 'all'], default='all',
+                            help='Item type to pull')
+    pull_parser.add_argument('--pattern',
+                            help='Pattern to match')
+    
+    # push command
+    push_parser = subparsers.add_parser('push',
+                                       help='Push items to Azure DevOps')
+    push_parser.add_argument('target', help='Variable group name')
+    push_parser.add_argument('--project', help='Target project')
+    push_parser.add_argument('--type', dest='item_type',
+                            choices=['vg', 'sf'],
+                            help='Item type (auto-detected if not specified)')
+    push_parser.add_argument('--create', action='store_true',
+                            help='Create if does not exist')
+    
+    # sf commands
+    sf_parser = subparsers.add_parser('sf', help='Manage secure files')
+    sf_subs = sf_parser.add_subparsers(dest='sf_command')
+    
+    # sf list
+    sf_list = sf_subs.add_parser('list', help='List secure files')
+    sf_list.add_argument('--project', help='Project name')
+    
+    # status command
+    subparsers.add_parser('status', help='Show cache status')
+    
+    # list command
+    list_parser = subparsers.add_parser('list', help='List cached items')
+    list_parser.add_argument('--type', dest='item_type',
+                            choices=['vg', 'sf', 'all'], default='all',
+                            help='Item type to list')
+    list_parser.add_argument('--project', help='Project name')
+    
+    return parser
+
+
+def handle_init(args, config):
+    """Handle init command."""
     # Set organization
-    config.organization = org
+    config.organization = args.org
     
     # Set project if provided
-    if project:
-        config.project = project
+    if args.project:
+        config.project = args.project
     
     # Save PAT (support env var reference)
+    pat = args.pat
     if pat.startswith('$'):
         pat = '${' + pat[1:] + '}'
     
-    config.set_org_config(org, {'pat': pat})
+    config.set_org_config(args.org, {'pat': pat})
     config.save()
     
     # Initialize cache
-    cache_root = Path(config.data['cache']['root'])
-    cache = CacheManager(cache_root, org)
+    cache_root = config.data['cache']['root']
+    cache = CacheManager(cache_root, args.org)
     
-    click.echo(f"✓ Initialized azvg for organization: {org}")
-    if project:
-        click.echo(f"✓ Default project set to: {project}")
-    click.echo(f"✓ Cache directory: {cache.org_dir}")
+    print("✓ Initialized azvg for organization: {0}".format(args.org))
+    if args.project:
+        print("✓ Default project set to: {0}".format(args.project))
+    print("✓ Cache directory: {0}".format(cache.org_dir))
 
 
-@main.group()
-@click.pass_context
-def project(ctx):
-    """Manage projects."""
-    pass
-
-
-@project.command('list')
-@click.pass_context
-def project_list(ctx):
-    """List all projects."""
-    config = ctx.obj['config']
-    
+def handle_project_list(args, config):
+    """Handle project list command."""
     if not config.organization:
-        click.echo("Error: No organization configured. Run 'azvg init' first.")
+        print("Error: No organization configured. Run 'azvg init' first.")
         sys.exit(1)
     
     pat = config.get_pat()
     if not pat:
-        click.echo("Error: No PAT configured for organization.")
+        print("Error: No PAT configured for organization.")
         sys.exit(1)
     
     client = AzureDevOpsClient(config.organization, pat)
-    proj_ctx = ProjectContext(config)
     
     try:
         projects = client.list_projects()
@@ -100,95 +191,95 @@ def project_list(ctx):
         for p in projects:
             name = p['name']
             is_current = '→' if name == config.project else ' '
-            is_cached = '✓' if (Path(config.data['cache']['root']) / 
-                              config.organization / name).exists() else ' '
+            
+            # Check if cached
+            cache_root = config.data['cache']['root']
+            project_dir = os.path.join(cache_root, config.organization, name)
+            is_cached = '✓' if os.path.exists(project_dir) else ' '
+            
             table_data.append([is_current, name, is_cached])
         
         headers = ['', 'Project', 'Cached']
-        click.echo(tabulate(table_data, headers=headers, tablefmt='simple'))
+        print(simple_table(table_data, headers))
         
     except Exception as e:
-        click.echo(f"Error: Failed to list projects: {e}")
+        print("Error: Failed to list projects: {0}".format(str(e)))
         sys.exit(1)
 
 
-@project.command('use')
-@click.argument('project_name')
-@click.pass_context
-def project_use(ctx, project_name: str):
-    """Set default project."""
-    config = ctx.obj['config']
+def handle_project_use(args, config):
+    """Handle project use command."""
     proj_ctx = ProjectContext(config)
-    
-    proj_ctx.use_project(project_name)
-    click.echo(f"✓ Switched to project: {project_name}")
+    proj_ctx.use_project(args.project_name)
+    print("✓ Switched to project: {0}".format(args.project_name))
 
 
-@project.command('info')
-@click.argument('project_name', required=False)
-@click.pass_context
-def project_info(ctx, project_name: Optional[str]):
-    """Show project information."""
-    config = ctx.obj['config']
+def handle_project_info(args, config):
+    """Handle project info command."""
     proj_ctx = ProjectContext(config)
     
-    project_name = project_name or config.project
+    project_name = args.project_name or config.project
     if not project_name:
-        click.echo("Error: No project specified or configured.")
+        print("Error: No project specified or configured.")
         sys.exit(1)
     
     # Get cache info
-    cache_root = Path(config.data['cache']['root'])
+    cache_root = config.data['cache']['root']
     cache = CacheManager(cache_root, config.organization)
     
     project_dir = cache.get_project_dir(project_name)
-    vg_count = len(list(cache.list_cached_vgs(project_name)))
-    sf_count = len(list(cache.list_cached_sfs(project_name)))
+    vg_count = len(cache.list_cached_vgs(project_name))
+    sf_count = len(cache.list_cached_sfs(project_name))
     
-    click.echo(f"Project: {project_name}")
-    click.echo(f"Organization: {config.organization}")
-    click.echo(f"Cache Directory: {project_dir}")
-    click.echo(f"Variable Groups: {vg_count}")
-    click.echo(f"Secure Files: {sf_count}")
+    print("Project: {0}".format(project_name))
+    print("Organization: {0}".format(config.organization))
+    print("Cache Directory: {0}".format(project_dir))
+    print("Variable Groups: {0}".format(vg_count))
+    print("Secure Files: {0}".format(sf_count))
 
 
-@main.command()
-@click.argument('target', required=False)
-@click.option('--project', help='Specific project')
-@click.option('--all-projects', is_flag=True, help='Pull from all projects')
-@click.option('--type', 'item_type', type=click.Choice(['vg', 'sf', 'all']),
-              default='all', help='Item type to pull')
-@click.option('--pattern', help='Pattern to match')
-@click.pass_context
-def pull(ctx, target: Optional[str], project: Optional[str],
-         all_projects: bool, item_type: str, pattern: Optional[str]):
-    """Pull items from Azure DevOps."""
-    config = ctx.obj['config']
-    
+def handle_project(args, config):
+    """Handle project commands."""
+    if args.project_command == 'list':
+        handle_project_list(args, config)
+    elif args.project_command == 'use':
+        handle_project_use(args, config)
+    elif args.project_command == 'info':
+        handle_project_info(args, config)
+    else:
+        print("Error: No project subcommand specified")
+        sys.exit(1)
+
+def handle_pull(args, config):
+    """Handle pull command."""
     if not config.organization:
-        click.echo("Error: No organization configured. Run 'azvg init' first.")
+        print("Error: No organization configured. Run 'azvg init' first.")
         sys.exit(1)
     
     # Determine project(s)
-    if all_projects:
+    if args.all_projects:
         pat = config.get_pat()
         client = AzureDevOpsClient(config.organization, pat)
-        projects = [p['name'] for p in client.list_projects()]
+        try:
+            projects = [p['name'] for p in client.list_projects()]
+        except Exception as e:
+            print("Error: Failed to list projects: {0}".format(str(e)))
+            sys.exit(1)
     else:
-        project = project or config.project
+        project = args.project or config.project
         if not project:
-            click.echo("Error: No project specified or configured.")
+            print("Error: No project specified or configured.")
             sys.exit(1)
         projects = [project]
     
     # Get client and cache
     pat = config.get_pat()
     if not pat:
-        click.echo("Error: No PAT configured.")
+        print("Error: No PAT configured.")
         sys.exit(1)
     
     client = AzureDevOpsClient(config.organization, pat)
-    cache_root = Path(config.data['cache']['root'])
+    cache_root = config.data['cache']['root']
     cache = CacheManager(cache_root, config.organization)
     
     # Process each project
@@ -196,78 +287,69 @@ def pull(ctx, target: Optional[str], project: Optional[str],
     total_sfs = 0
     
     for proj in projects:
-        click.echo(f"\nPulling from project: {proj}")
+        print("\nPulling from project: {0}".format(proj))
         
         # Pull variable groups
-        if item_type in ['vg', 'all']:
+        if args.item_type in ['vg', 'all']:
             try:
                 vgs = client.get_variable_groups(proj)
                 
                 # Filter by target/pattern
-                if target or pattern:
-                    search = target or pattern
+                if args.target or args.pattern:
+                    search = args.target or args.pattern
                     vgs = [vg for vg in vgs 
                           if search.lower() in vg['name'].lower()]
                 
                 for vg in vgs:
                     cache.save_variable_group(proj, vg)
-                    click.echo(f"  ✓ {vg['name']} (VG:{vg['id']})")
+                    print("  ✓ {0} (VG:{1})".format(vg['name'], vg['id']))
                     total_vgs += 1
                     
             except Exception as e:
-                click.echo(f"  ⚠ Failed to pull variable groups: {e}")
+                print("  ⚠ Failed to pull variable groups: {0}".format(str(e)))
         
         # Pull secure files
-        if item_type in ['sf', 'all']:
+        if args.item_type in ['sf', 'all']:
             try:
                 sfs = client.list_secure_files(proj)
                 
                 # Filter by target/pattern
-                if target or pattern:
-                    search = target or pattern
+                if args.target or args.pattern:
+                    search = args.target or args.pattern
                     sfs = [sf for sf in sfs
                           if search.lower() in sf['name'].lower()]
                 
                 for sf in sfs:
                     content = client.download_secure_file(proj, sf['id'])
                     cache.save_secure_file(proj, sf['name'], content, sf['id'])
-                    click.echo(f"  ✓ {sf['name']} (SF:{sf['id']})")
+                    print("  ✓ {0} (SF:{1})".format(sf['name'], sf['id']))
                     total_sfs += 1
                     
             except Exception as e:
-                click.echo(f"  ⚠ Failed to pull secure files: {e}")
+                print("  ⚠ Failed to pull secure files: {0}".format(str(e)))
     
-    click.echo(f"\n✓ Pulled {total_vgs} variable groups, {total_sfs} secure files")
+    print("\n✓ Pulled {0} variable groups, {1} secure files".format(
+        total_vgs, total_sfs))
 
 
-@main.command()
-@click.argument('target')
-@click.option('--project', help='Target project')
-@click.option('--type', 'item_type', type=click.Choice(['vg', 'sf']),
-              help='Item type (auto-detected if not specified)')
-@click.option('--create', is_flag=True, help='Create if does not exist')
-@click.pass_context
-def push(ctx, target: str, project: Optional[str], 
-         item_type: Optional[str], create: bool):
-    """Push items to Azure DevOps."""
-    config = ctx.obj['config']
-    
-    project = project or config.project
+def handle_push(args, config):
+    """Handle push command."""
+    project = args.project or config.project
     if not project:
-        click.echo("Error: No project specified or configured.")
+        print("Error: No project specified or configured.")
         sys.exit(1)
     
     pat = config.get_pat()
     if not pat:
-        click.echo("Error: No PAT configured.")
+        print("Error: No PAT configured.")
         sys.exit(1)
     
     client = AzureDevOpsClient(config.organization, pat)
-    cache_root = Path(config.data['cache']['root'])
+    cache_root = config.data['cache']['root']
     cache = CacheManager(cache_root, config.organization)
     
     # Try to load from cache
-    vg_data = cache.load_variable_group(project, target)
+    vg_data = cache.load_variable_group(project, args.target)
     
     if vg_data:
         # Push variable group
@@ -276,40 +358,30 @@ def push(ctx, target: str, project: Optional[str],
                 # Update existing
                 result = client.update_variable_group(project, 
                                                      vg_data['id'], vg_data)
-                click.echo(f"✓ Updated {result['name']} (VG:{result['id']})")
-            elif create:
+                print("✓ Updated {0} (VG:{1})".format(result['name'], 
+                                                      result['id']))
+            elif args.create:
                 # Create new
                 vg_data.pop('id', None)
                 result = client.create_variable_group(project, vg_data)
-                click.echo(f"✓ Created {result['name']} (VG:{result['id']})")
+                print("✓ Created {0} (VG:{1})".format(result['name'], 
+                                                      result['id']))
             else:
-                click.echo(f"Error: {target} not found on server. Use --create to create new.")
+                print("Error: {0} not found on server. Use --create to create new.".format(args.target))
         except Exception as e:
-            click.echo(f"Error: Failed to push variable group: {e}")
+            print("Error: Failed to push variable group: {0}".format(str(e)))
     else:
-        click.echo(f"Error: {target} not found in cache")
+        print("Error: {0} not found in cache".format(args.target))
 
 
-@main.group('sf')
-@click.pass_context
-def secure_files(ctx):
-    """Manage secure files."""
-    pass
-
-
-@secure_files.command('list')
-@click.option('--project', help='Project name')
-@click.pass_context
-def sf_list(ctx, project: Optional[str]):
-    """List secure files."""
-    config = ctx.obj['config']
-    
-    project = project or config.project
+def handle_sf_list(args, config):
+    """Handle sf list command."""
+    project = args.project or config.project
     if not project:
-        click.echo("Error: No project specified or configured.")
+        print("Error: No project specified or configured.")
         sys.exit(1)
     
-    cache_root = Path(config.data['cache']['root'])
+    cache_root = config.data['cache']['root']
     cache = CacheManager(cache_root, config.organization)
     
     sfs = cache.list_cached_sfs(project)
@@ -317,80 +389,111 @@ def sf_list(ctx, project: Optional[str]):
     if sfs:
         table_data = []
         for sf in sfs:
-            size_kb = sf['size'] / 1024
-            table_data.append([sf['name'], f"{size_kb:.1f} KB", 
-                             sf['modified'].strftime('%Y-%m-%d %H:%M')])
+            size_kb = sf['size'] / 1024.0
+            table_data.append([sf['name'], "{0:.1f} KB".format(size_kb), 
+                             sf['modified']])
         
         headers = ['Name', 'Size', 'Modified']
-        click.echo(tabulate(table_data, headers=headers, tablefmt='simple'))
+        print(simple_table(table_data, headers))
     else:
-        click.echo("No cached secure files found.")
+        print("No cached secure files found.")
 
 
-@main.command()
-@click.pass_context
-def status(ctx):
-    """Show cache status."""
-    config = ctx.obj['config']
-    
+def handle_sf(args, config):
+    """Handle sf commands."""
+    if args.sf_command == 'list':
+        handle_sf_list(args, config)
+    else:
+        print("Error: No sf subcommand specified")
+        sys.exit(1)
+
+
+def handle_status(args, config):
+    """Handle status command."""
     if not config.organization:
-        click.echo("No organization configured. Run 'azvg init' first.")
+        print("No organization configured. Run 'azvg init' first.")
         return
     
-    cache_root = Path(config.data['cache']['root'])
+    cache_root = config.data['cache']['root']
     cache = CacheManager(cache_root, config.organization)
     
     status = cache.get_status()
     
-    click.echo(f"Organization: {status['organization']}")
+    print("Organization: {0}".format(status['organization']))
     if config.project:
-        click.echo(f"Default Project: {config.project}")
-    click.echo(f"Cache Directory: {status['cache_dir']}")
-    click.echo(f"Git Tracking: {'✓' if status['git_tracking'] else '✗'}")
+        print("Default Project: {0}".format(config.project))
+    print("Cache Directory: {0}".format(status['cache_dir']))
+    print("Git Tracking: {0}".format('✓' if status['git_tracking'] else '✗'))
     
     if status['projects']:
-        click.echo("\nPROJECTS:")
+        print("\nPROJECTS:")
         for proj in status['projects']:
             is_default = ' [default]' if proj['name'] == config.project else ''
-            click.echo(f"  {proj['name']}: {proj['variable_groups']} VGs, "
-                      f"{proj['secure_files']} SFs{is_default}")
+            print("  {0}: {1} VGs, {2} SFs{3}".format(
+                proj['name'], proj['variable_groups'], 
+                proj['secure_files'], is_default))
     else:
-        click.echo("\nNo cached projects found.")
+        print("\nNo cached projects found.")
 
 
-@main.command()
-@click.option('--type', 'item_type', type=click.Choice(['vg', 'sf', 'all']),
-              default='all', help='Item type to list')
-@click.option('--project', help='Project name')  
-@click.pass_context
-def list(ctx, item_type: str, project: Optional[str]):
-    """List cached items."""
-    config = ctx.obj['config']
-    
-    project = project or config.project
+def handle_list(args, config):
+    """Handle list command."""
+    project = args.project or config.project
     if not project:
-        click.echo("Error: No project specified or configured.")
+        print("Error: No project specified or configured.")
         sys.exit(1)
     
-    cache_root = Path(config.data['cache']['root'])
+    cache_root = config.data['cache']['root']
     cache = CacheManager(cache_root, config.organization)
     
     # List variable groups
-    if item_type in ['vg', 'all']:
+    if args.item_type in ['vg', 'all']:
         vgs = cache.list_cached_vgs(project)
         if vgs:
-            click.echo("\nVariable Groups:")
+            print("\nVariable Groups:")
             for vg in vgs:
-                click.echo(f"  {vg['name']} (ID: {vg['id']})")
+                print("  {0} (ID: {1})".format(vg['name'], vg['id']))
     
     # List secure files
-    if item_type in ['sf', 'all']:
+    if args.item_type in ['sf', 'all']:
         sfs = cache.list_cached_sfs(project)
         if sfs:
-            click.echo("\nSecure Files:")
+            print("\nSecure Files:")
             for sf in sfs:
-                size_kb = sf['size'] / 1024
-                click.echo(f"  {sf['name']} ({size_kb:.1f} KB)")
+                size_kb = sf['size'] / 1024.0
+                print("  {0} ({1:.1f} KB)".format(sf['name'], size_kb))
+
+
+def main():
+    """Main entry point."""
+    parser = create_argument_parser()
+    args = parser.parse_args()
+    
+    if not args.command:
+        parser.print_help()
+        sys.exit(1)
+    
+    # Load configuration
+    config = Config()
+    
+    # Route to appropriate handler
+    if args.command == 'init':
+        handle_init(args, config)
+    elif args.command == 'project':
+        handle_project(args, config)
+    elif args.command == 'pull':
+        handle_pull(args, config)
+    elif args.command == 'push':
+        handle_push(args, config)
+    elif args.command == 'sf':
+        handle_sf(args, config)
+    elif args.command == 'status':
+        handle_status(args, config)
+    elif args.command == 'list':
+        handle_list(args, config)
+    else:
+        print("Error: Unknown command: {0}".format(args.command))
+        sys.exit(1)
 
 
 if __name__ == '__main__':

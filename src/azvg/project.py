@@ -1,18 +1,15 @@
 """Project context management for azvg."""
 
-from typing import Optional, List, Tuple, Dict, Any
-from pathlib import Path
+import os.path
 import logging
-
-from .config import Config
 
 logger = logging.getLogger(__name__)
 
 
-class ProjectContext:
+class ProjectContext(object):
     """Manages project context and operations."""
     
-    def __init__(self, config: Config):
+    def __init__(self, config):
         """Initialize project context.
         
         Args:
@@ -23,32 +20,32 @@ class ProjectContext:
         self._current_org = config.organization
     
     @property
-    def current_project(self) -> Optional[str]:
+    def current_project(self):
         """Get current project."""
         return self._current_project
     
     @current_project.setter
-    def current_project(self, value: str) -> None:
+    def current_project(self, value):
         """Set current project."""
         self._current_project = value
         self.config.project = value
         self.config.save()
     
     @property
-    def current_org(self) -> Optional[str]:
+    def current_org(self):
         """Get current organization."""
         return self._current_org
     
-    def use_project(self, project: str) -> None:
+    def use_project(self, project):
         """Switch to specified project.
         
         Args:
             project: Project name.
         """
-        logger.info(f"Switching to project: {project}")
+        logger.info("Switching to project: {0}".format(project))
         self.current_project = project
     
-    def list_projects(self, org: Optional[str] = None) -> List[str]:
+    def list_projects(self, org=None):
         """List available projects.
         
         Args:
@@ -65,7 +62,7 @@ class ProjectContext:
         projects = org_config.get('projects', {})
         return list(projects.keys())
     
-    def get_project_info(self, project: Optional[str] = None) -> Dict[str, Any]:
+    def get_project_info(self, project=None):
         """Get project information.
         
         Args:
@@ -81,7 +78,7 @@ class ProjectContext:
         org_config = self.config.get_org_config(self.current_org)
         return org_config.get('projects', {}).get(project, {})
     
-    def detect_project_from_target(self, target: str) -> Tuple[str, str]:
+    def detect_project_from_target(self, target):
         """Auto-detect project from target notation.
         
         Args:
@@ -104,7 +101,7 @@ class ProjectContext:
         # Use default project
         return self.current_project or '', target
     
-    def is_project(self, name: str) -> bool:
+    def is_project(self, name):
         """Check if name is a valid project.
         
         Args:
@@ -115,8 +112,7 @@ class ProjectContext:
         """
         return name in self.list_projects()
     
-    def get_project_cache_dir(self, project: Optional[str] = None,
-                             org: Optional[str] = None) -> Path:
+    def get_project_cache_dir(self, project=None, org=None):
         """Get cache directory for project.
         
         Args:
@@ -132,5 +128,5 @@ class ProjectContext:
         if not org or not project:
             raise ValueError("Organization and project must be specified")
         
-        cache_root = Path(self.config.data['cache']['root'])
-        return cache_root / org / project
+        cache_root = self.config.data['cache']['root']
+        return os.path.join(cache_root, org, project)

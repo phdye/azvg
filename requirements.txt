@@ -1,6 +1,19 @@
-click>=8.0.0
-pyyaml>=6.0
-requests>=2.28.0
-colorama>=0.4.4
-python-dateutil>=2.8.0
-tabulate>=0.9.0
+# AZVG Requirements for Python 3.2.5
+# 
+# This project uses ONLY the Python 3.2.5 standard library.
+# No external dependencies are allowed due to target environment constraints.
+#
+# External dependencies replaced with standard library:
+# - click -> argparse (built-in)
+# - pyyaml -> json (built-in) 
+# - requests -> urllib2 (built-in)
+# - colorama -> (not needed)
+# - python-dateutil -> datetime (built-in)
+# - tabulate -> custom simple_table function
+#
+# To install azvg:
+#   python setup.py install
+#
+# For development:
+#   python setup.py develop
+#   # OR add src/ to PYTHONPATH

@@ -1,47 +1,46 @@
 """Configuration management for azvg."""
 
 import os
-import yaml
-from pathlib import Path
-from typing import Dict, Any, Optional
+import os.path
+import json
 
 
-class Config:
+class Config(object):
     """Manages azvg configuration."""
     
-    def __init__(self, config_dir: Optional[Path] = None):
+    def __init__(self, config_dir=None):
         """Initialize configuration.
         
         Args:
             config_dir: Optional config directory path.
         """
         self.config_dir = config_dir or self._default_config_dir()
-        self.config_file = self.config_dir / "config.yaml"
+        self.config_file = os.path.join(self.config_dir, "config.json")
         self.data = self._load_config()
     
     @staticmethod
-    def _default_config_dir() -> Path:
+    def _default_config_dir():
         """Get default configuration directory."""
-        if os.name == 'nt':
-            base = Path(os.environ.get('APPDATA', '~'))
-        else:
-            base = Path(os.environ.get('XDG_CONFIG_HOME', '~/.config'))
-        
-        return (base / '.azvg').expanduser()
+        # Use ~/.azvg as per design document
+        return os.path.expanduser('~/.azvg')
     
-    def _load_config(self) -> Dict[str, Any]:
+    def _load_config(self):
         """Load configuration from file.
         
         Returns:
             Configuration dictionary.
         """
-        if not self.config_file.exists():
+        if not os.path.exists(self.config_file):
             return self._default_config()
         
-        with open(self.config_file, 'r') as f:
-            return yaml.safe_load(f) or {}
+        try:
+            with open(self.config_file, 'r') as f:
+                return json.load(f) or {}
+        except (IOError, ValueError) as e:
+            # Return default config if file is corrupted
+            return self._default_config()
     
-    def _default_config(self) -> Dict[str, Any]:
+    def _default_config(self):
         """Return default configuration.
         
         Returns:
@@ -54,43 +53,46 @@ class Config:
             },
             'organizations': {},
             'cache': {
-                'root': str(self.config_dir),
+                'root': self.config_dir,
                 'git_tracking': True,
                 'auto_commit': True,
             }
         }
     
-    def save(self) -> None:
+    def save(self):
         """Save configuration to file."""
-        self.config_dir.mkdir(parents=True, exist_ok=True)
+        # Ensure config directory exists
+        if not os.path.exists(self.config_dir):
+            os.makedirs(self.config_dir)
+        
         with open(self.config_file, 'w') as f:
-            yaml.dump(self.data, f, default_flow_style=False)
+            json.dump(self.data, f, indent=2, sort_keys=True)
     
     @property
-    def organization(self) -> Optional[str]:
+    def organization(self):
         """Get current organization."""
         return self.data.get('default', {}).get('organization')
     
     @organization.setter
-    def organization(self, value: str) -> None:
+    def organization(self, value):
         """Set current organization."""
         if 'default' not in self.data:
             self.data['default'] = {}
         self.data['default']['organization'] = value
     
     @property
-    def project(self) -> Optional[str]:
+    def project(self):
         """Get current project."""
         return self.data.get('default', {}).get('project')
     
     @project.setter
-    def project(self, value: str) -> None:
+    def project(self, value):
         """Set current project."""
         if 'default' not in self.data:
             self.data['default'] = {}
         self.data['default']['project'] = value
     
-    def get_org_config(self, org: str) -> Dict[str, Any]:
+    def get_org_config(self, org):
         """Get organization configuration.
         
         Args:
@@ -101,7 +103,7 @@ class Config:
         """
         return self.data.get('organizations', {}).get(org, {})
     
-    def set_org_config(self, org: str, config: Dict[str, Any]) -> None:
+    def set_org_config(self, org, config):
         """Set organization configuration.
         
         Args:
@@ -112,7 +114,7 @@ class Config:
             self.data['organizations'] = {}
         self.data['organizations'][org] = config
     
-    def get_pat(self, org: Optional[str] = None) -> Optional[str]:
+    def get_pat(self, org=None):
         """Get PAT for organization.
         
         Args:
