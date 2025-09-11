@@ -1,6 +1,8 @@
 """Azure DevOps Variable Groups Manager.
 
 A tool for managing Azure DevOps Library items locally with git tracking.
+
+License: MIT OR Apache-2.0
 """
 
 __version__ = "0.1.0"
