@@ -1,0 +1,351 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+azvg-upload: Upload/merge Azure DevOps variable groups
+Usage: azvg-upload <vg-file|vg-name|vg-id> [options]
+
+Options:
+    --new               Create a new variable group
+    -i, --ignore-case   Case-insensitive name matching
+
+Rules:
+- Can specify variable group by file path, name, or ID
+- Must not be a new variable group unless --new flag is specified
+- Overwrites destination values, except for secure variables
+- For secure variables, only overwrites if the new value is not null
+"""
+
+import base64
+import json
+import os
+import sys
+import argparse
+
+# Import variable group utilities
+try:
+    from vg_utils import find_vg_file, resolve_vg_identifier
+except ImportError:
+    # Fallback if vg_utils is not available
+    def find_vg_file(identifier, directory='variable-groups'):
+        if os.path.isfile(identifier):
+            return identifier
+        test_path = os.path.join(directory, identifier)
+        if os.path.isfile(test_path):
+            return test_path
+        if not identifier.endswith('.json'):
+            test_path = os.path.join(directory, identifier + '.json')
+            if os.path.isfile(test_path):
+                return test_path
+        return None
+    
+    def resolve_vg_identifier(identifier, directory='variable-groups', ignore_case=False, use_regex=False):
+        return []
+
+try:
+    import urllib2
+except ImportError:
+    import urllib.request as urllib2
+    import urllib.error as urllib_error
+    HTTPError = urllib_error.HTTPError
+else:
+    HTTPError = urllib2.HTTPError
+
+# ---------- CONFIGURATION ----------
+ORG = os.environ.get("AZURE_DEVOPS_ORG")
+PROJECT = os.environ.get("AZURE_DEVOPS_PROJECT")
+PAT = os.environ.get("AZURE_DEVOPS_PAT")
+API_VERSION = '7.1-preview.2'
+VARIABLE_GROUPS_DIR = 'variable-groups'
+# -----------------------------------
+
+def create_auth_header(pat):
+    """Create authorization header for Azure DevOps API"""
+    auth = ':' + pat
+    encoded = base64.b64encode(auth.encode('utf-8')).decode('utf-8')
+    return {'Authorization': 'Basic ' + encoded, 'Content-Type': 'application/json'}
+
+def fetch_url(url, headers, method='GET', data=None):
+    """Make HTTP request to Azure DevOps API"""
+    if data:
+        data = json.dumps(data).encode('utf-8')
+    
+    req = urllib2.Request(url, data=data, headers=headers)
+    req.get_method = lambda: method
+    
+    try:
+        response = urllib2.urlopen(req)
+        return response.read()
+    except HTTPError as e:
+        error_body = e.read().decode('utf-8')
+        print('HTTP Error %d: %s' % (e.code, error_body))
+        return None
+
+def get_existing_variable_group(group_id, headers):
+    """Fetch existing variable group by ID"""
+    url = 'https://dev.azure.com/%s/%s/_apis/distributedtask/variablegroups/%s?api-version=%s' % (
+        ORG, PROJECT, group_id, API_VERSION)
+    
+    response = fetch_url(url, headers)
+    if response:
+        return json.loads(response)
+    return None
+
+def get_all_variable_groups(headers):
+    """Fetch all variable groups to resolve name to ID"""
+    url = 'https://dev.azure.com/%s/%s/_apis/distributedtask/variablegroups?api-version=%s' % (
+        ORG, PROJECT, API_VERSION)
+    
+    response = fetch_url(url, headers)
+    if response:
+        data = json.loads(response)
+        return data.get('value', [])
+    return []
+
+def resolve_remote_identifier(identifier, headers, ignore_case=False):
+    """
+    Resolve a name or ID to a variable group ID using remote API.
+    
+    Args:
+        identifier: Variable group name or ID
+        headers: API headers
+        ignore_case: Case-insensitive matching
+    
+    Returns:
+        str: Variable group ID or None
+    """
+    # If it's numeric, assume it's an ID
+    if str(identifier).isdigit():
+        return str(identifier)
+    
+    # Search by name
+    all_groups = get_all_variable_groups(headers)
+    
+    # Exact match
+    for group in all_groups:
+        if group.get('name') == identifier:
+            return str(group['id'])
+    
+    # Case-insensitive match
+    if ignore_case:
+        identifier_lower = identifier.lower()
+        for group in all_groups:
+            if group.get('name', '').lower() == identifier_lower:
+                return str(group['id'])
+    
+    return None
+
+def merge_variables(existing_vars, new_vars):
+    """
+    Merge variables with special handling for secure variables.
+    - Overwrites all non-secure variables
+    - For secure variables, only overwrites if new value is not null
+    """
+    merged = {}
+    
+    # Start with existing variables
+    for key, var_data in existing_vars.items():
+        merged[key] = var_data
+    
+    # Merge in new variables
+    for key, var_data in new_vars.items():
+        if key in existing_vars:
+            existing_var = existing_vars[key]
+            # Check if it's a secure variable
+            if existing_var.get('isSecret', False):
+                # Only overwrite secure variable if new value is not null
+                if var_data.get('value') is not None:
+                    merged[key] = var_data
+                else:
+                    # Keep existing secure variable
+                    pass
+            else:
+                # Always overwrite non-secure variables
+                merged[key] = var_data
+        else:
+            # New variable, add it
+            merged[key] = var_data
+    
+    return merged
+
+def create_variable_group(vg_data, headers):
+    """Create a new variable group"""
+    url = 'https://dev.azure.com/%s/%s/_apis/distributedtask/variablegroups?api-version=%s' % (
+        ORG, PROJECT, API_VERSION)
+    
+    # Remove id field for creation
+    if 'id' in vg_data:
+        del vg_data['id']
+    
+    response = fetch_url(url, headers, method='POST', data=vg_data)
+    if response:
+        result = json.loads(response)
+        print('Successfully created variable group: %s (ID: %s)' % (
+            result.get('name'), result.get('id')))
+        return True
+    return False
+
+def update_variable_group(vg_data, headers, ignore_case=False):
+    """Update an existing variable group"""
+    group_id = vg_data.get('id')
+    
+    # If no ID in file, try to resolve from name
+    if not group_id:
+        group_name = vg_data.get('name')
+        if group_name:
+            print('No ID in file, attempting to resolve name "%s" to ID...' % group_name)
+            group_id = resolve_remote_identifier(group_name, headers, ignore_case)
+            if group_id:
+                print('Resolved to ID: %s' % group_id)
+                vg_data['id'] = group_id
+    
+    if not group_id:
+        print('Error: Variable group ID not found and could not be resolved')
+        if not ignore_case:
+            print('Try using --ignore-case for case-insensitive matching')
+        print('Use --new flag to create a new variable group')
+        return False
+    
+    # Get existing variable group
+    existing_vg = get_existing_variable_group(group_id, headers)
+    if not existing_vg:
+        print('Error: Variable group with ID %s not found' % group_id)
+        print('Use --new flag to create a new variable group')
+        return False
+    
+    # Merge variables
+    merged_vars = merge_variables(
+        existing_vg.get('variables', {}),
+        vg_data.get('variables', {})
+    )
+    
+    # Prepare update data
+    update_data = existing_vg.copy()
+    update_data['variables'] = merged_vars
+    
+    # Update other fields from input file (except certain system fields)
+    skip_fields = ['createdOn', 'modifiedOn', 'createdBy', 'modifiedBy']
+    for key, value in vg_data.items():
+        if key not in skip_fields:
+            update_data[key] = value
+    
+    # Make update request
+    url = 'https://dev.azure.com/%s/_apis/distributedtask/variablegroups/%s?api-version=%s' % (
+        ORG, group_id, API_VERSION)
+    
+    response = fetch_url(url, headers, method='PUT', data=update_data)
+    if response:
+        result = json.loads(response)
+        print('Successfully updated variable group: %s (ID: %s)' % (
+            result.get('name'), result.get('id')))
+        return True
+    return False
+
+def find_vg_file_path(identifier, ignore_case=False):
+    """
+    Find the variable group file path from an identifier.
+    
+    Args:
+        identifier: File path, variable group name, or ID
+        ignore_case: Case-insensitive matching
+    
+    Returns:
+        str: Path to the JSON file or None
+    """
+    # First check if it's a direct file path
+    if os.path.isfile(identifier):
+        return identifier
+    
+    # Try to find using utilities
+    filepath = find_vg_file(identifier, VARIABLE_GROUPS_DIR)
+    if filepath:
+        return filepath
+    
+    # Try with case-insensitive matching
+    if ignore_case:
+        results = resolve_vg_identifier(identifier, VARIABLE_GROUPS_DIR, ignore_case=True)
+        if results:
+            vg_id, vg_name = results[0]
+            filepath = find_vg_file(vg_id if vg_id else vg_name, VARIABLE_GROUPS_DIR)
+            if filepath:
+                return filepath
+    
+    # If identifier is numeric, try standard naming
+    if identifier.isdigit():
+        # Look for any file with this ID
+        if os.path.exists(VARIABLE_GROUPS_DIR):
+            for filename in os.listdir(VARIABLE_GROUPS_DIR):
+                if filename.startswith('vg_%s_' % identifier) and filename.endswith('.json'):
+                    return os.path.join(VARIABLE_GROUPS_DIR, filename)
+    
+    return None
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Upload/merge Azure DevOps variable groups',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  azvg-upload 347                       # Upload by ID
+  azvg-upload "My Variable Group"       # Upload by name
+  azvg-upload path/to/file.json         # Upload by file path
+  azvg-upload template.json --new       # Create new group
+  azvg-upload -i "my group"             # Case-insensitive name
+        """)
+    
+    parser.add_argument('identifier',
+                        help='Variable group file path, name, or ID')
+    parser.add_argument('--new', action='store_true',
+                        help='Create a new variable group')
+    parser.add_argument('-i', '--ignore-case', action='store_true',
+                        help='Case-insensitive name matching')
+    
+    args = parser.parse_args()
+    
+    # Check environment variables
+    if not all([ORG, PROJECT, PAT]):
+        print('Error: Missing required environment variables')
+        print('Please set: AZURE_DEVOPS_ORG, AZURE_DEVOPS_PROJECT, AZURE_DEVOPS_PAT')
+        sys.exit(1)
+    
+    # Find the file to upload
+    vg_file = find_vg_file_path(args.identifier, ignore_case=args.ignore_case)
+    
+    if not vg_file:
+        print('Error: Could not find variable group file for: %s' % args.identifier)
+        print('Searched in:')
+        print('  - Direct file path')
+        print('  - %s/ directory' % VARIABLE_GROUPS_DIR)
+        if not args.ignore_case:
+            print('\nTry using --ignore-case for case-insensitive matching')
+        print('\nYou can specify:')
+        print('  - A file path: path/to/file.json')
+        print('  - A variable group ID: 347')
+        print('  - A variable group name: "My Variable Group"')
+        sys.exit(1)
+    
+    print('Using file: %s' % vg_file)
+    
+    # Load variable group data
+    try:
+        with open(vg_file, 'r') as f:
+            vg_data = json.load(f)
+    except json.JSONDecodeError as e:
+        print('Error: Invalid JSON in file: %s' % e)
+        sys.exit(1)
+    
+    # Create auth header
+    headers = create_auth_header(PAT)
+    
+    # Process based on --new flag
+    if args.new:
+        print('Creating new variable group from: %s' % vg_file)
+        success = create_variable_group(vg_data, headers)
+    else:
+        print('Updating/merging variable group from: %s' % vg_file)
+        success = update_variable_group(vg_data, headers, ignore_case=args.ignore_case)
+    
+    sys.exit(0 if success else 1)
+
+if __name__ == '__main__':
+    main()

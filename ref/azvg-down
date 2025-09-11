@@ -1,0 +1,374 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+azvg-down: Download Azure DevOps variable groups
+Usage: azvg-down <pattern|vg-name|vg-id> [options]
+
+Downloads variable group(s) and saves them under ./variable-groups/ directory
+in the current working directory. Can download by name, ID, pattern, or all variable groups.
+
+Options:
+    --all                    Download all variable groups
+    -i, --ignore-case        Case-insensitive pattern matching
+    -r, --regex              Use Perl-compatible regex instead of glob patterns
+    
+Examples:
+    azvg-down 347                    # Download by ID
+    azvg-down "My Variable Group"    # Download by exact name
+    azvg-down "Prod*"                # Download all groups starting with "Prod"
+    azvg-down --ignore-case "prod*"  # Case-insensitive pattern
+    azvg-down -r "^(Dev|Test).*"     # Regex pattern
+    azvg-down --all                  # Download all groups
+"""
+
+from __future__ import print_function  # Python 2/3 compatibility
+import base64
+import json
+import os
+import sys
+import argparse
+import re
+
+# Import variable group utilities
+try:
+    from vg_utils import (
+        create_vg_filename, 
+        resolve_vg_identifier, 
+        find_vg_file,
+        match_pattern
+    )
+except ImportError:
+    # Fallback if vg_utils is not available
+    def create_vg_filename(vg_id, vg_name, preserve_exact=True):
+        if preserve_exact:
+            # Only replace OS-forbidden characters
+            forbidden_chars = '<>:"/\\|?*' if os.name == 'nt' else '/'
+            safe_name = vg_name
+            for char in forbidden_chars:
+                safe_name = safe_name.replace(char, '_')
+        else:
+            safe_name = vg_name.replace(' ', '_').replace('/', '_').replace('\\', '_')
+            safe_name = ''.join(c for c in safe_name if c.isalnum() or c in ('_', '-'))
+        
+        if vg_id:
+            return 'vg_%s_%s.json' % (vg_id, safe_name)
+        else:
+            return '%s.json' % safe_name
+    
+    def resolve_vg_identifier(identifier, directory='variable-groups', ignore_case=False, use_regex=False):
+        return []
+    
+    def find_vg_file(identifier, directory='variable-groups'):
+        return None
+    
+    def match_pattern(pattern, names, ignore_case=False, use_regex=False):
+        return []
+
+# Python 2/3 compatibility for urllib
+try:
+    import urllib2
+except ImportError:
+    import urllib.request as urllib2
+    import urllib.error as urllib_error
+    HTTPError = urllib_error.HTTPError
+else:
+    HTTPError = urllib2.HTTPError
+
+# ---------- CONFIGURATION ----------
+ORG = os.environ.get("AZURE_DEVOPS_ORG")
+PROJECT = os.environ.get("AZURE_DEVOPS_PROJECT")
+PAT = os.environ.get("AZURE_DEVOPS_PAT")
+API_VERSION = '7.1-preview.2'
+SAVE_DIR = 'variable-groups'  # Directory to save downloaded variable groups (relative to cwd)
+# -----------------------------------
+
+def create_auth_header(pat):
+    """Create authorization header for Azure DevOps API"""
+    auth = ':' + pat
+    encoded = base64.b64encode(auth.encode('utf-8')).decode('utf-8')
+    return {'Authorization': 'Basic ' + encoded, 'Content-Type': 'application/json'}
+
+def fetch_url(url, headers, method='GET'):
+    """Make HTTP request to Azure DevOps API"""
+    req = urllib2.Request(url, headers=headers)
+    req.get_method = lambda: method
+    
+    try:
+        response = urllib2.urlopen(req)
+        return response.read()
+    except HTTPError as e:
+        error_body = e.read().decode('utf-8')
+        print('HTTP Error %d: %s' % (e.code, error_body))
+        return None
+
+def get_all_variable_groups(headers):
+    """Fetch all variable groups"""
+    url = 'https://dev.azure.com/%s/%s/_apis/distributedtask/variablegroups?api-version=%s' % (
+        ORG, PROJECT, API_VERSION)
+    
+    response = fetch_url(url, headers)
+    if response:
+        data = json.loads(response)
+        return data.get('value', [])
+    return []
+
+def get_variable_group_by_id(group_id, headers):
+    """Fetch variable group by ID"""
+    url = 'https://dev.azure.com/%s/%s/_apis/distributedtask/variablegroups/%s?api-version=%s' % (
+        ORG, PROJECT, group_id, API_VERSION)
+    
+    response = fetch_url(url, headers)
+    if response:
+        return json.loads(response)
+    return None
+
+def save_variable_group(vg_data, save_dir):
+    """Save variable group to file using standardized naming with exact name preservation"""
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    
+    group_name = vg_data.get('name', 'unknown')
+    group_id = vg_data.get('id')
+    
+    # Use utility function to create standardized filename with exact name
+    filename = create_vg_filename(group_id, group_name, preserve_exact=True)
+    filepath = os.path.join(save_dir, filename)
+    
+    # Save JSON with nice formatting
+    with open(filepath, 'w') as f:
+        json.dump(vg_data, f, indent=2, sort_keys=False)
+    
+    print('Saved to: %s' % filepath)
+    return filepath
+
+def display_variable_group_info(vg_data):
+    """Display information about a variable group"""
+    print('\nVariable Group Details:')
+    print('  Name: %s' % vg_data.get('name'))
+    print('  ID: %s' % vg_data.get('id'))
+    print('  Description: %s' % (vg_data.get('description') or 'None'))
+    
+    variables = vg_data.get('variables', {})
+    print('  Variables: %d' % len(variables))
+    
+    if variables:
+        print('\n  Variable names:')
+        for var_name in sorted(variables.keys()):
+            var_info = variables[var_name]
+            is_secret = var_info.get('isSecret', False)
+            if is_secret:
+                print('    - %s (secret)' % var_name)
+            else:
+                value = var_info.get('value', '')
+                # Truncate long values
+                if len(value) > 50:
+                    value = value[:47] + '...'
+                print('    - %s = %s' % (var_name, value))
+
+def download_groups_by_pattern(pattern, headers, ignore_case=False, use_regex=False):
+    """
+    Download variable groups matching a pattern.
+    
+    Args:
+        pattern: Pattern to match (glob or regex)
+        headers: API headers
+        ignore_case: Case-insensitive matching
+        use_regex: Use regex instead of glob
+    
+    Returns:
+        int: Number of groups downloaded
+    """
+    # Get all groups
+    all_groups = get_all_variable_groups(headers)
+    if not all_groups:
+        print('No variable groups found')
+        return 0
+    
+    # Extract names and create mapping
+    group_dict = {}
+    for group in all_groups:
+        group_dict[group.get('name', '')] = group
+    
+    # Match pattern against names
+    all_names = list(group_dict.keys())
+    matching_names = match_pattern(pattern, all_names, ignore_case, use_regex)
+    
+    if not matching_names:
+        if use_regex:
+            print('No variable groups found matching regex pattern: %s' % pattern)
+        else:
+            print('No variable groups found matching pattern: %s' % pattern)
+        return 0
+    
+    print('Found %d variable groups matching pattern "%s"' % (len(matching_names), pattern))
+    
+    # Download each matching group
+    count = 0
+    for name in matching_names:
+        group_summary = group_dict[name]
+        group_id = group_summary['id']
+        print('\nDownloading: %s (ID: %s)' % (name, group_id))
+        
+        # Get full details
+        vg_data = get_variable_group_by_id(group_id, headers)
+        if vg_data:
+            save_variable_group(vg_data, SAVE_DIR)
+            display_variable_group_info(vg_data)
+            count += 1
+    
+    return count
+
+def resolve_identifier(identifier, headers, ignore_case=False):
+    """
+    Resolve an identifier to a variable group ID.
+    Tries local resolution first, then remote.
+    
+    Args:
+        identifier: Variable group name or ID
+        headers: API headers
+        ignore_case: Case-insensitive matching
+    
+    Returns:
+        str: Variable group ID or None
+    """
+    # Check if it's already an ID (numeric)
+    if identifier.isdigit():
+        return identifier
+    
+    # Try local resolution first
+    local_results = resolve_vg_identifier(identifier, SAVE_DIR, ignore_case=ignore_case)
+    if local_results:
+        vg_id, vg_name = local_results[0]
+        print('Resolved "%s" to ID %s from local cache' % (identifier, vg_id))
+        return vg_id
+    
+    # Try remote resolution by searching all groups
+    print('Searching for "%s" in remote variable groups...' % identifier)
+    all_groups = get_all_variable_groups(headers)
+    
+    # Exact match
+    for group in all_groups:
+        if group.get('name') == identifier:
+            return str(group['id'])
+    
+    # Case-insensitive match if requested
+    if ignore_case:
+        identifier_lower = identifier.lower()
+        for group in all_groups:
+            if group.get('name', '').lower() == identifier_lower:
+                return str(group['id'])
+    
+    return None
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Download Azure DevOps variable groups',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  azvg-down 347                    # Download by ID
+  azvg-down "My Variable Group"    # Download by exact name
+  azvg-down "Prod*"                # Download all groups starting with "Prod"
+  azvg-down --ignore-case "prod*"  # Case-insensitive pattern
+  azvg-down -r "^(Dev|Test).*"     # Regex pattern
+  azvg-down --all                  # Download all groups
+        """)
+    
+    parser.add_argument('identifier', nargs='?',
+                        help='Variable group name, ID, or pattern')
+    parser.add_argument('--all', action='store_true',
+                        help='Download all variable groups')
+    parser.add_argument('-i', '--ignore-case', '--ignore', action='store_true',
+                        help='Case-insensitive pattern matching')
+    parser.add_argument('-r', '--regex', action='store_true',
+                        help='Use Perl-compatible regex instead of glob patterns')
+    
+    args = parser.parse_args()
+    
+    # Check environment variables
+    if not all([ORG, PROJECT, PAT]):
+        print('Error: Missing required environment variables')
+        print('Please set: AZURE_DEVOPS_ORG, AZURE_DEVOPS_PROJECT, AZURE_DEVOPS_PAT')
+        sys.exit(1)
+    
+    # Create auth header
+    headers = create_auth_header(PAT)
+    
+    print('Organization: %s' % ORG)
+    print('Project: %s' % PROJECT)
+    print('Save directory: ./%s/' % SAVE_DIR)
+    print('Working directory: %s' % os.getcwd())
+    print('-' * 50)
+    
+    # Process based on arguments
+    if args.all:
+        # Download all variable groups
+        print('Downloading all variable groups...\n')
+        all_groups = get_all_variable_groups(headers)
+        
+        if not all_groups:
+            print('No variable groups found')
+            sys.exit(1)
+        
+        print('Found %d variable groups' % len(all_groups))
+        
+        for group_summary in all_groups:
+            group_id = group_summary['id']
+            group_name = group_summary.get('name', 'unknown')
+            print('\nDownloading: %s (ID: %s)' % (group_name, group_id))
+            
+            # Get full details
+            vg_data = get_variable_group_by_id(group_id, headers)
+            if vg_data:
+                save_variable_group(vg_data, SAVE_DIR)
+                display_variable_group_info(vg_data)
+        
+        print('\n%d variable groups downloaded to ./%s/' % (len(all_groups), SAVE_DIR))
+        
+    elif args.identifier:
+        # Check if it's a pattern
+        identifier = args.identifier
+        is_pattern = ('*' in identifier or '?' in identifier or '[' in identifier) or args.regex
+        
+        if is_pattern:
+            # Download by pattern
+            count = download_groups_by_pattern(
+                identifier, headers, 
+                ignore_case=args.ignore_case, 
+                use_regex=args.regex
+            )
+            
+            if count > 0:
+                print('\n%d variable groups downloaded to ./%s/' % (count, SAVE_DIR))
+            else:
+                sys.exit(1)
+        else:
+            # Download specific variable group
+            # Resolve identifier to ID (supports both name and ID)
+            group_id = resolve_identifier(identifier, headers, ignore_case=args.ignore_case)
+            
+            if group_id:
+                print('Downloading variable group ID: %s' % group_id)
+                vg_data = get_variable_group_by_id(group_id, headers)
+                
+                if vg_data:
+                    filepath = save_variable_group(vg_data, SAVE_DIR)
+                    display_variable_group_info(vg_data)
+                    print('\nSuccessfully downloaded variable group')
+                else:
+                    print('Error: Failed to download variable group with ID %s' % group_id)
+                    sys.exit(1)
+            else:
+                print('Error: Variable group not found: %s' % identifier)
+                if not args.ignore_case:
+                    print('Try using --ignore-case for case-insensitive matching')
+                sys.exit(1)
+    
+    else:
+        # No arguments provided
+        parser.print_help()
+        sys.exit(1)
+
+if __name__ == '__main__':
+    main()

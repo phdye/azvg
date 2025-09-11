@@ -1,0 +1,329 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+Azure DevOps Variable Groups Comparison Tool
+
+Compares two variable groups and shows differences in variables.
+
+Usage:
+    azvg-compare <group_a> <group_b> [options]
+    
+Options:
+    -n, --names, --names-only    Compare only variable names, not values
+    -i, --ignore-case            Case-insensitive name matching
+    -h, --help                   Show this help message
+    
+Arguments:
+    <group_a>, <group_b>         Variable group identifiers (name, ID, or file path)
+                                 Searches in ./variable-groups/ directory
+"""
+
+import json
+import os
+import sys
+from collections import OrderedDict
+
+# Import variable group utilities
+try:
+    from vg_utils import find_vg_file, resolve_vg_identifier
+except ImportError:
+    # Fallback if vg_utils is not available
+    def find_vg_file(identifier, directory='variable-groups'):
+        if os.path.isfile(identifier):
+            return identifier
+        
+        # Try in directory
+        safe_name = identifier.replace(' ', '_').replace('/', '_')
+        possible_names = [
+            os.path.join(directory, safe_name + '.json'),
+            os.path.join(directory, safe_name),
+            os.path.join(directory, identifier + '.json'),
+            os.path.join(directory, identifier)
+        ]
+        
+        for name in possible_names:
+            if os.path.isfile(name):
+                return name
+        return None
+    
+    def resolve_vg_identifier(identifier, directory='variable-groups', ignore_case=False, use_regex=False):
+        return []
+
+# Configuration
+# Look for variable-groups in current working directory
+VARIABLE_GROUPS_DIR = 'variable-groups'
+
+def print_usage():
+    """Print usage information"""
+    print(__doc__)
+    sys.exit(0)
+
+def load_variable_group(identifier, ignore_case=False):
+    """
+    Load a variable group from a JSON file.
+    
+    Args:
+        identifier: Variable group name, ID, or file path
+        ignore_case: Case-insensitive matching
+        
+    Returns:
+        dict: The loaded variable group data
+    """
+    # First try to find the file using utilities
+    filepath = find_vg_file(identifier, VARIABLE_GROUPS_DIR)
+    
+    if not filepath:
+        # Try direct file path
+        if os.path.isfile(identifier):
+            filepath = identifier
+        else:
+            # Try to resolve by ID/name and search for matching files
+            results = resolve_vg_identifier(identifier, VARIABLE_GROUPS_DIR, ignore_case=ignore_case)
+            
+            if results:
+                vg_id, vg_name = results[0]
+                # Try to find file with resolved ID/name
+                search_term = vg_id if vg_id else vg_name
+                filepath = find_vg_file(search_term, VARIABLE_GROUPS_DIR)
+            
+            if not filepath:
+                # Last resort: look for any file containing the identifier
+                if os.path.exists(VARIABLE_GROUPS_DIR):
+                    identifier_lower = identifier.lower() if ignore_case else identifier
+                    for filename in os.listdir(VARIABLE_GROUPS_DIR):
+                        filename_check = filename.lower() if ignore_case else filename
+                        if identifier in filename_check or identifier.replace(' ', '_') in filename_check:
+                            filepath = os.path.join(VARIABLE_GROUPS_DIR, filename)
+                            break
+    
+    if not filepath:
+        print("Error: Could not find variable group file for '%s'" % identifier)
+        print("Searched in:")
+        print("  - Direct file path")
+        print("  - %s/ directory" % VARIABLE_GROUPS_DIR)
+        print("\nYou can specify:")
+        print("  - A file path: path/to/file.json")
+        print("  - A variable group ID: 347")
+        print("  - A variable group name: 'My Variable Group'")
+        if not ignore_case:
+            print("\nTry using -i or --ignore-case for case-insensitive matching")
+        sys.exit(1)
+    
+    try:
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+            print("Loaded: %s" % filepath)
+            return data
+    except Exception as e:
+        print("Error loading file '%s': %s" % (filepath, str(e)))
+        sys.exit(1)
+
+def extract_variables(group_data):
+    """
+    Extract variables from group data.
+    
+    Args:
+        group_data: The variable group data
+        
+    Returns:
+        dict: Dictionary of variable names to values
+    """
+    variables = group_data.get('variables', {})
+    result = OrderedDict()
+    
+    for var_name, var_data in sorted(variables.items()):
+        if isinstance(var_data, dict):
+            # Variable is an object with 'value' and possibly 'isSecret'
+            result[var_name] = {
+                'value': var_data.get('value', ''),
+                'isSecret': var_data.get('isSecret', False)
+            }
+        else:
+            # Variable is a simple value
+            result[var_name] = {
+                'value': var_data,
+                'isSecret': False
+            }
+    
+    return result
+
+def compare_variable_groups(group_a, group_b, names_only=False):
+    """
+    Compare two variable groups and print differences.
+    
+    Args:
+        group_a: First variable group data
+        group_b: Second variable group data
+        names_only: If True, only compare variable names
+    """
+    name_a = group_a.get('name', 'Group A')
+    name_b = group_b.get('name', 'Group B')
+    id_a = group_a.get('id', 'N/A')
+    id_b = group_b.get('id', 'N/A')
+    
+    vars_a = extract_variables(group_a)
+    vars_b = extract_variables(group_b)
+    
+    all_vars = sorted(set(list(vars_a.keys()) + list(vars_b.keys())))
+    
+    print("\n" + "=" * 80)
+    print("VARIABLE GROUP COMPARISON")
+    print("=" * 80)
+    print("Group A: %s (ID: %s)" % (name_a, id_a))
+    print("Group B: %s (ID: %s)" % (name_b, id_b))
+    print("-" * 80)
+    
+    if names_only:
+        # Compare only variable names
+        vars_only_in_a = sorted(set(vars_a.keys()) - set(vars_b.keys()))
+        vars_only_in_b = sorted(set(vars_b.keys()) - set(vars_a.keys()))
+        vars_in_both = sorted(set(vars_a.keys()) & set(vars_b.keys()))
+        
+        if vars_only_in_a:
+            print("\nVariables only in '%s':" % name_a)
+            for var in vars_only_in_a:
+                print("  + %s" % var)
+        
+        if vars_only_in_b:
+            print("\nVariables only in '%s':" % name_b)
+            for var in vars_only_in_b:
+                print("  - %s" % var)
+        
+        if vars_in_both:
+            print("\nVariables in both groups (%d):" % len(vars_in_both))
+            for var in vars_in_both:
+                print("  = %s" % var)
+        
+        print("\nSummary:")
+        print("  Total in '%s': %d" % (name_a, len(vars_a)))
+        print("  Total in '%s': %d" % (name_b, len(vars_b)))
+        print("  Common variables: %d" % len(vars_in_both))
+        print("  Unique to '%s': %d" % (name_a, len(vars_only_in_a)))
+        print("  Unique to '%s': %d" % (name_b, len(vars_only_in_b)))
+        
+    else:
+        # Compare both names and values
+        differences = []
+        only_in_a = []
+        only_in_b = []
+        identical = []
+        
+        for var in all_vars:
+            if var in vars_a and var in vars_b:
+                # Variable exists in both
+                val_a = vars_a[var]
+                val_b = vars_b[var]
+                
+                if val_a['isSecret'] or val_b['isSecret']:
+                    # At least one is a secret
+                    if val_a['isSecret'] != val_b['isSecret']:
+                        differences.append((var, val_a, val_b, 'secret_mismatch'))
+                    else:
+                        # Both are secrets, can't compare values
+                        identical.append((var, True))
+                elif val_a['value'] != val_b['value']:
+                    differences.append((var, val_a, val_b, 'value_diff'))
+                else:
+                    identical.append((var, False))
+            elif var in vars_a:
+                only_in_a.append(var)
+            else:
+                only_in_b.append(var)
+        
+        # Print results
+        if only_in_a:
+            print("\nVariables only in '%s':" % name_a)
+            for var in only_in_a:
+                val = vars_a[var]
+                if val['isSecret']:
+                    print("  + %s = [SECRET]" % var)
+                else:
+                    print("  + %s = %s" % (var, val['value']))
+        
+        if only_in_b:
+            print("\nVariables only in '%s':" % name_b)
+            for var in only_in_b:
+                val = vars_b[var]
+                if val['isSecret']:
+                    print("  - %s = [SECRET]" % var)
+                else:
+                    print("  - %s = %s" % (var, val['value']))
+        
+        if differences:
+            print("\nVariables with different values:")
+            for var, val_a, val_b, diff_type in differences:
+                if diff_type == 'secret_mismatch':
+                    print("  ! %s:" % var)
+                    print("      A: %s" % ("[SECRET]" if val_a['isSecret'] else val_a['value']))
+                    print("      B: %s" % ("[SECRET]" if val_b['isSecret'] else val_b['value']))
+                else:
+                    print("  ! %s:" % var)
+                    print("      A: %s" % val_a['value'])
+                    print("      B: %s" % val_b['value'])
+        
+        if identical:
+            print("\nIdentical variables (%d):" % len(identical))
+            for var, is_secret in identical:
+                if is_secret:
+                    print("  = %s [SECRET]" % var)
+                else:
+                    print("  = %s" % var)
+        
+        print("\nSummary:")
+        print("  Total in '%s': %d" % (name_a, len(vars_a)))
+        print("  Total in '%s': %d" % (name_b, len(vars_b)))
+        print("  Identical: %d" % len(identical))
+        print("  Different: %d" % len(differences))
+        print("  Unique to '%s': %d" % (name_a, len(only_in_a)))
+        print("  Unique to '%s': %d" % (name_b, len(only_in_b)))
+    
+    print("=" * 80)
+
+def main():
+    """Main entry point"""
+    # Parse arguments
+    args = sys.argv[1:]
+    
+    if not args or '-h' in args or '--help' in args:
+        print_usage()
+    
+    # Check for flags
+    names_only = False
+    ignore_case = False
+    
+    # Process flags
+    remaining_args = []
+    for arg in args:
+        if arg in ['-n', '--names', '--names-only']:
+            names_only = True
+        elif arg in ['-i', '--ignore-case', '--ignore']:
+            ignore_case = True
+        elif not arg.startswith('-'):
+            remaining_args.append(arg)
+    
+    # Require exactly two arguments
+    if len(remaining_args) != 2:
+        print("Error: Please provide exactly two variable groups to compare")
+        print("Usage: azvg-compare <group_a> <group_b> [options]")
+        print("\nExamples:")
+        print("  azvg-compare 347 348              # Compare by IDs")
+        print("  azvg-compare 'Dev' 'Prod'         # Compare by names")
+        print("  azvg-compare dev.json prod.json   # Compare by file paths")
+        print("\nOptions:")
+        print("  -n, --names-only    Compare only variable names")
+        print("  -i, --ignore-case   Case-insensitive name matching")
+        sys.exit(1)
+    
+    group_a_id = remaining_args[0]
+    group_b_id = remaining_args[1]
+    
+    # Load the variable groups
+    print("Loading variable groups...")
+    group_a = load_variable_group(group_a_id, ignore_case=ignore_case)
+    group_b = load_variable_group(group_b_id, ignore_case=ignore_case)
+    
+    # Compare them
+    compare_variable_groups(group_a, group_b, names_only)
+
+if __name__ == '__main__':
+    main()
